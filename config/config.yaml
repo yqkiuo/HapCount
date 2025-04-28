@@ -2,8 +2,8 @@ genome_build: "hg38"  # or "hg19"
 use_chr_prefix: true  # whether to keep "chr" prefix in chromosome names
 run_shapeit: true # wheter to run shapeit. Suggested for bulk sequencing
 
-chromosomes: range(1, 23) + ["X", "Y"]
-chrom: range(1, 23) + ["X", "Y"]
+chromosomes: range(1, 23) + ["X"]
+chrom: range(1, 23) + ["X"]
 
 
 references:

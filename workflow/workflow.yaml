@@ -7,7 +7,7 @@ ruleorder:
 
 # define references files
 def get_reference_files(wildcards):
-    """Return appropriate reference files based on genome build and chromosome"""
+    ## Return appropriate reference files based on genome build and chromosome
     build = config["genome_build"]
     chrom = wildcards.chrom if hasattr(wildcards, 'chrom') else None
     
@@ -17,8 +17,8 @@ def get_reference_files(wildcards):
     
     if chrom:
         refs.update({
-            "shapeit_map": config["references"][build]["shapeit"]["map"],
-	    "shapeit_ref": config["references"][build]["shapeit"]["ref"]
+            "shapeit_map": config["references"][build]["shapeit"]["map"].format(chrom=chrom),
+            "shapeit_ref": config["references"][build]["shapeit"]["ref"].format(chrom=chrom)
         })
     
     return refs
@@ -51,8 +51,9 @@ rule whatshap_phasing:
         whatshap phase {params.whatshap_params} \
 	    -o {output.phased_vcf} \
 	    {input.vcf} {input.bam} 2> {log}
-	tabix -f -p vcf {output.phased_vcf}
-	rm {output.filtered_vcf}
+	   
+        tabix -f -p vcf {output.phased_vcf}
+	    rm {output.filtered_vcf}
         """
 
 rule manual_phasing:
@@ -65,6 +66,7 @@ rule manual_phasing:
     shell:
         """
 	## Process both "chr1" and "1" formats consistently
+    ## Keep it or not?
         zcat {input.vcf} | \
         sed 's/##contig=<ID=chr\([0-9XYM]\+\),/##contig=<ID=\1,/' | \
         sed 's/^chr//' | \
@@ -86,59 +88,105 @@ rule manual_phasing:
 rule shapeit_phasing:
     input:
         vcf = rules.manual_phasing.output.vcf,
-	map_file = lambda wildcards: get_reference_files(wildcards)["shapeit_map"],
-	ref_fie = lambda wildcards: get_reference_files(wildcards)["shapeit_ref"]
+	    map_file = lambda wildcards: get_reference_files(wildcards)["shapeit_map"],
+	    ref_fie = lambda wildcards: get_reference_files(wildcards)["shapeit_ref"]
     output:
-        shaped_vcf = "results/shapeit/{sample}.phased.vcf",
-	bingraph = "results/shapeit/{sample}.bingraph"
+        shaped_vcf = "results/shapeit/{sample}/chr{chrom}.phased.vcf.gz",
+        bingraph = "results/shapeit/{sample}/chr{chrom}.bingraph"
     params:
         shapeit_params = config.get("shapeit_params", "")
+        chrom = lambda wildcards: wildcards.chrom
     log:
-        "logs/shapeit/{sample}.log"
+        "logs/shapeit/{sample}_chr{chrom}.log"
     conda:
         "envs/shapeit.yaml"
     shell:
 	"""
+    ## run SHAPEIT4 without chr prefix
+    ## run it or not?
+    zcat {input.vcf} | \
+    sed 's/##contig=<ID=chr\([0-9XYM]\+\),/##contig=<ID=\1,/' | \
+    sed 's/^chr//' | \
 	shapeit4 {params.shapeit_params} \
-	    --output {output.shaped_vcf} \
-	    --bingraph {output.bingraph}
+        --input - \
+        --map {input.map_file} \
+        --reference {input.ref_file} \
+        --region {params.chrom} \
+	    --output {output.shaped_vcf}.tmp \
+	    --bingraph {output.bingraph} 2> {log}
 
 	## adding chr if necessary
 	if [ "{config[use_chr_prefix]}" = "true" ]; then
-	    zcat {output.shaped_vcf} | \
+    ## Preprocess VCF headers and add chr prefix
+	    zcat {output.shaped_vcf}.tmp | \
 	    awk -v OFS=\"\t\" '/^#/{print} !/^#/{\$1=\"chr\"\$1; print}' | \
 	    sed -i 's/##contig=<ID=\([0-9XYM]\+\)>/##contig=<ID=chr\1>/' | \
-	    bgzip -c > {output.shaped_vcf}.tmp 
-	        	    
+	    bgzip -c > {output.shaped_vcf}.
+        
+    else    	    
 	    mv {output.shaped_vcf}.tmp {output.shaped_vcf}
-	    tabix -f -p vcf {output.shaped_vcf} 
 	fi
+    
+    tabix -f -p vcf {output.shaped_vcf} 
+    rm {output.shaped_vcf}.tmp
 
 	## change phasing in whatshap by shapeit
+    python3 scripts/find_PS_to_update.py 
+    {output.shaped_vcf} {input.vcf} \
+    results/whatshap/{wildcards.sample}_chr{wildcards.chrom}.updated.vcf.gz
+
+    tabix -f -p vcf results/whatshap/{wildcards.sample}_chr{wildcards.chrom}.updated.vcf.gz
+
 
 	"""
 
-
-
-# Rule to run haplotag
+# Rule to run haplotag per chromosome
 rule haplotag:
     input:
-        vcf = rules.shapeit_phasing.output.shaped_vcf,
-        bam = "input/{sample}.bam"
+        vcf = "results/whatshap/{sample}_chr{chrom}.updated.vcf.gz",
+        bam = "input/{sample}.bam",
+        ref = lambda wildcards: config["references"][config["genome_build"]]["genome_fa"]
     output:
-        tagged_bam = "results/haplotag/{sample}.haplotagged.bam"
+        tagged_bam = "results/haplotag/{sample}_chr{chrom}.haplotagged.bam",
+        bai = "results/haplotag/{sample}_chr{chrom}.haplotagged.bam.bai"
     params:
-        haplotag_params = config.get("haplotag_params", "")
+        haplotag_params = config.get("haplotag_params", ""),
+        region = lambda wildcards: f"chr{wildcards.chrom}" if config["use_chr_prefix"] else wildcards.chrom
     log:
-        "logs/haplotag/{sample}.log"
+        "logs/haplotag/{sample}_chr{chrom}.log"
     conda:
         "envs/haplotag.yaml"
     shell:
-        "whatshap haplotag {params.haplotag_params} "
-        "-o {output.tagged_bam} {input.vcf} {input.bam} "
-        "2> {log}"
+        """
+        # Run haplotag for the specific chromosome
+        whatshap haplotag {params.haplotag_params} \
+            --reference {input.ref} \
+            --region {params.region} \
+            --output {output.tagged_bam} \
+            {input.vcf} {input.bam} 2> {log}
+        
+        # Index the output BAM
+        samtools index {output.tagged_bam}
+        """
 
-# Rule to count reads per PS per allele
+rule merge_haplotagged_bams:
+    input:
+        expand("results/haplotag/{sample}_chr{chrom}.haplotagged.bam",
+               sample=config["samples"],
+               chrom=config["chromosomes"])
+    output:
+        merged_bam = "results/haplotag/{sample}.merged.haplotagged.bam",
+        bai = "results/haplotag/{sample}.merged.haplotagged.bam.bai"
+    shell:
+        """
+        samtools merge -f -@ {threads} {output.merged_bam} {input}
+        samtools index {output.merged_bam}
+
+        ## remove chr.bam.files or not
+        rm {input}
+        """
+
+# Rule to count reads per PS per allele per sample
 rule count_ps_reads:
     input:
         bam = rules.haplotag.output.tagged_bam,
