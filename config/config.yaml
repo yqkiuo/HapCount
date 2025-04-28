@@ -2,32 +2,41 @@ genome_build: "hg38"  # or "hg19"
 use_chr_prefix: true  # whether to keep "chr" prefix in chromosome names
 run_shapeit: true # wheter to run shapeit. Suggested for bulk sequencing
 
-chromosomes: range(1, 23) + ["X"]
-chrom: range(1, 23) + ["X"]
+## Execution parameters
+resources:
+  default_threads: 8  # Can be overridden with --config default_threads=N
+  highmem_threads: 4  # For memory-intensive tasks
+  whatshap_threads: 4  # Specific to WhatsHap
+  shapeit_threads: 8   # Specific to SHAPEIT
 
+## counting
+datatypes: ["scRNA", "bulkRNA", "bulkDNA", "bulkmethylation"]
+default_datatype: "scRNA"
+binsize: 50000
+
+chromosomes: range(1, 23) + ["X"]
 
 references:
   hg19:
-    genome_fa: "resources/genomes/hg19/XXX.fa"
+    genome_fa: "resources/genomes/hg19/genome.fa"
     shapeit:
       map: "resources/tools/shapeit/hg19/map/chr{chrom}.b37.gmap.gz"
       ref: "resources/tools/shapeit/hg19/reference/ALL.chr{chrom}.integrated_phase1_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
   
   hg38:
-    genome_fa: "resources/genomes/hg38/XXX.fa"
+    genome_fa: "resources/genomes/hg38/genome.fa"
     shapeit:
       map: "resources/tools/shapeit/hg38/map/chr{chrom}.b38.gmap.gz"
       ref: "resources/tools/shapeit/hg38/reference/ALL.chr{chrom}.shapeit2_integrated_snvindels_v2a_27022019.GRCh38.phased.vcf.gz"
 
 parameters:
-    whatshap:
-	--tag=PS 
-	--ignore-read-groups 
-    shapeit:
-	--thread 8 
-	--region {chrom}
-	--use-PS 0
-	
+  whatshap:
+    phase_params: "--tag=PS --ignore-read-groups"
+  shapeit:
+    base_params: "--thread 8 --use-PS 0.0001"
+  # Defaults that can be overridden
+  defaults:
+    min_dp: 15
 
 
 

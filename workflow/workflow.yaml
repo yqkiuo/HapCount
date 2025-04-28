@@ -33,9 +33,9 @@ rule whatshap_phasing:
     output:
         filtered_vcf = "results/whatshap/{sample}.filtered.vcf.gz"
         phased_vcf = "results/whatshap/{sample}.phased.vcf.gz"
+    threads: config["resources"]["whatshap_threads"]
     params:
-        # Parameters from config file with defaults
-        whatshap_params = config.get("whatshap_params", ""),
+        whatshap_params = config["parameters"]["whatshap"]["phase_params"]
 	min_dp = config.get("min_dp", 15)
     log:
         "logs/whatshap/{sample}.log"
@@ -62,7 +62,7 @@ rule manual_phasing:
     output:
         vcf = "results/whatshap/{sample}.phased.manual.vcf.gz"
     params:
-        chrom = chrom_handler
+        chrom = lambda wildcards: wildcards.chrom
     shell:
         """
 	## Process both "chr1" and "1" formats consistently
@@ -93,8 +93,9 @@ rule shapeit_phasing:
     output:
         shaped_vcf = "results/shapeit/{sample}/chr{chrom}.phased.vcf.gz",
         bingraph = "results/shapeit/{sample}/chr{chrom}.bingraph"
+    threads: config["resources"]["shapeit_threads"]
     params:
-        shapeit_params = config.get("shapeit_params", "")
+        shapeit_params = config["parameters"]["shapeit"]["base_params"]
         chrom = lambda wildcards: wildcards.chrom
     log:
         "logs/shapeit/{sample}_chr{chrom}.log"
@@ -131,12 +132,11 @@ rule shapeit_phasing:
     rm {output.shaped_vcf}.tmp
 
 	## change phasing in whatshap by shapeit
-    python3 scripts/find_PS_to_update.py 
+    python3 scripts/find_PS_to_update.py \
     {output.shaped_vcf} {input.vcf} \
     results/whatshap/{wildcards.sample}_chr{wildcards.chrom}.updated.vcf.gz
 
     tabix -f -p vcf results/whatshap/{wildcards.sample}_chr{wildcards.chrom}.updated.vcf.gz
-
 
 	"""
 
@@ -159,7 +159,7 @@ rule haplotag:
     shell:
         """
         # Run haplotag for the specific chromosome
-        whatshap haplotag {params.haplotag_params} \
+        whatshap haplotag \
             --reference {input.ref} \
             --region {params.region} \
             --output {output.tagged_bam} \
@@ -169,42 +169,102 @@ rule haplotag:
         samtools index {output.tagged_bam}
         """
 
-rule merge_haplotagged_bams:
-    input:
-        expand("results/haplotag/{sample}_chr{chrom}.haplotagged.bam",
-               sample=config["samples"],
-               chrom=config["chromosomes"])
-    output:
-        merged_bam = "results/haplotag/{sample}.merged.haplotagged.bam",
-        bai = "results/haplotag/{sample}.merged.haplotagged.bam.bai"
-    shell:
-        """
-        samtools merge -f -@ {threads} {output.merged_bam} {input}
-        samtools index {output.merged_bam}
+#### counting rules ####
 
-        ## remove chr.bam.files or not
-        rm {input}
-        """
+def get_counting_script(wildcards):
+    ## Return the appropriate counting script path based on datatype
+    script_map = {
+        "scRNA": "count_haplotag_scRNA.sh",
+        "bulkRNA": "count_haplotag_bulk.sh",
+        "bulkDNA": "count_haplotag_bulk.sh",  # WGS and WES
+        "bulkmethylation": "count_haplotag_meth.sh"
+    }
+    return f"scripts/{script_map[wildcards.datatype]}"
 
-# Rule to count reads per PS per allele per sample
-rule count_ps_reads:
+# Common rule template
+def counting_rule(datatype):
+    """Generate counting rule for a specific datatype"""
+    return f"""
+rule count_{datatype}:
     input:
         bam = rules.haplotag.output.tagged_bam,
-        vcf = rules.shapeit_phasing.output.shaped_vcf
     output:
-        counts = "results/counts/{sample}.counts.tsv"
+        counts = "results/counts/{{sample}}_{datatype}.{chrom}.counts.tsv"
     params:
-        script = "scripts/count_ps_reads.py"  # Your custom script
+        script = get_counting_script("{datatype}"),
+        binsize = config["binsize"] 
+        chrom = lambda wildcards: wildcards.chrom
     log:
-        "logs/counts/{sample}.log"
+        "logs/counts/{{sample}}_{datatype}.log"
     conda:
         "envs/counting.yaml"
     shell:
-        "python {params.script} {input.bam} {input.vcf} "
-        "> {output.counts} 2> {log}"
+        "bash {{params.script}} {{input.bam}} {f'{{params.binsize}}' if datatype in ['scRNA', 'bulkRNA'] else ''} {{output.counts}} 2> {{log}}"
+    """
 
-# Aggregation rule for multiple samples
-rule all:
+# Generate rules for all datatypes
+for datatype in config["datatypes"]:
+    counting_rule(datatype)
+
+
+
+#### aggregating rules ####
+
+def get_aggre_script(wildcards):
+    ## Return the appropriate counting script path based on datatype
+    script_map = {
+        "scRNA": "aggre_haplotag_scRNA.sh",
+        "bulkRNA": "aggre_haplotag_bulk.sh",
+        "bulkDNA": "aggre_haplotag_bulk.sh",  
+        "bulkmethylation": "aggre_haplotag_meth.sh"
+    }
+    return f"scripts/{script_map[wildcards.datatype]}"
+
+
+def aggregating_rule(datatype):
+    """ Generate aggregating rule for a specific datatype by binsize """
+    return f"""
+
+rule aggregate_{datatype}:
     input:
-        expand("results/counts/{sample}.counts.tsv", 
-               sample=config["samples"])
+        counts = "results/counts/{{sample}}_{datatype}_chr{{chrom}}.counts.tsv"
+    output:
+        aggregated = "results/aggregated/tmp/{{sample}}_{datatype}_chr{{chrom}}.agg.tsv"
+    params:
+        script = get_aggregate_script("{datatype}"),
+        binsize = config["binsizes"]
+    log:
+        "logs/aggregation/{{sample}}_{datatype}_chr{{chrom}}.log"
+    conda:
+        "envs/aggregation.yaml"
+    shell:
+        \"\"\"
+        # Run aggregation script
+        bash {{params.script}} \\
+            {{input.counts}} \\
+            {{params.binsize}} \\
+            {{output.aggregated}} 2> {{log}}
+        \"\"\"
+
+rule aggregate_{datatype}_wholegenome:
+    inputs:
+        expand("results/aggregated/tmp/{{sample}}_{datatype}_chr{{chrom}}.agg.tsv",
+               chrom=config["chromosomes"])
+    output:
+        final = "results/aggregated/{{sample}}_{datatype}.tsv"
+    shell:
+    \"\"\"
+        # Combine all chromosome results
+        cat {{input}} > {{output.final}}
+        # Clean up temporary files
+        rm {{input}}
+    \"\"\"
+    
+    """
+
+# Generate rules for all datatypes
+for datatype in config["datatypes"]:
+    for rule_text in generate_aggregation_rules(datatype):
+        exec(rule_text)
+
+
