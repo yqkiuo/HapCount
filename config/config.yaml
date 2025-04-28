@@ -1,0 +1,33 @@
+genome_build: "hg38"  # or "hg19"
+use_chr_prefix: true  # whether to keep "chr" prefix in chromosome names
+run_shapeit: true # wheter to run shapeit. Suggested for bulk sequencing
+
+chromosomes: range(1, 23) + ["X", "Y"]
+chrom: range(1, 23) + ["X", "Y"]
+
+
+references:
+  hg19:
+    genome_fa: "resources/genomes/hg19/XXX.fa"
+    shapeit:
+      map: "resources/tools/shapeit/hg19/map/chr{chrom}.b37.gmap.gz"
+      ref: "resources/tools/shapeit/hg19/reference/ALL.chr{chrom}.integrated_phase1_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
+  
+  hg38:
+    genome_fa: "resources/genomes/hg38/XXX.fa"
+    shapeit:
+      map: "resources/tools/shapeit/hg38/map/chr{chrom}.b38.gmap.gz"
+      ref: "resources/tools/shapeit/hg38/reference/ALL.chr{chrom}.shapeit2_integrated_snvindels_v2a_27022019.GRCh38.phased.vcf.gz"
+
+parameters:
+    whatshap:
+	--tag=PS 
+	--ignore-read-groups 
+    shapeit:
+	--thread 8 
+	--region {chrom}
+	--use-PS 0
+	
+
+
+

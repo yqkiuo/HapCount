@@ -1,0 +1,162 @@
+# Snakefile for Phasing Pipeline
+
+# Define rule order for logical workflow
+ruleorder:
+    haplotag > count_ps_reads > shapeit_phasing > whatshap_phasing
+
+
+# define references files
+def get_reference_files(wildcards):
+    """Return appropriate reference files based on genome build and chromosome"""
+    build = config["genome_build"]
+    chrom = wildcards.chrom if hasattr(wildcards, 'chrom') else None
+    
+    refs = {
+        "genome_fa": config["references"][build]["genome_fa"] ## ref for whatshap
+    }
+    
+    if chrom:
+        refs.update({
+            "shapeit_map": config["references"][build]["shapeit"]["map"],
+	    "shapeit_ref": config["references"][build]["shapeit"]["ref"]
+        })
+    
+    return refs
+
+
+# Rule to run WhatsHap phasing
+rule whatshap_phasing:
+    input:
+        vcf = "results/{sample}.vcf.gz",
+        bam = "input/{sample}.bam"，
+        ref = lambda wildcards: get_reference_files(wildcards)["genome_fa"]
+    output:
+        filtered_vcf = "results/whatshap/{sample}.filtered.vcf.gz"
+        phased_vcf = "results/whatshap/{sample}.phased.vcf.gz"
+    params:
+        # Parameters from config file with defaults
+        whatshap_params = config.get("whatshap_params", ""),
+	min_dp = config.get("min_dp", 15)
+    log:
+        "logs/whatshap/{sample}.log"
+    conda:
+        "envs/whatshap.yaml"
+    shell:
+        """
+        bcftools view -m2 -M2 -f PASS \
+	    -i 'GT="het" & FORMAT/DP > {params.min_dp}' \
+       	    -Oz -o {output.filtered_vcf} {input.vcf}"
+        tabix -f -p vcf {output.filtered_vcf}
+
+        whatshap phase {params.whatshap_params} \
+	    -o {output.phased_vcf} \
+	    {input.vcf} {input.bam} 2> {log}
+	tabix -f -p vcf {output.phased_vcf}
+	rm {output.filtered_vcf}
+        """
+
+rule manual_phasing:
+    input:
+        vcf = "results/whatshap/{sample}.phased.vcf.gz"
+    output:
+        vcf = "results/whatshap/{sample}.phased.manual.vcf.gz"
+    params:
+        chrom = chrom_handler
+    shell:
+        """
+	## Process both "chr1" and "1" formats consistently
+        zcat {input.vcf} | \
+        sed 's/##contig=<ID=chr\([0-9XYM]\+\),/##contig=<ID=\1,/' | \
+        sed 's/^chr//' | \
+        awk -v OFS="\\t" 'BEGIN {{FS=OFS}}
+            /^#/ {{print}}
+            !/^#/ {{
+                if (index($9, "PS") == 0) {{
+                    $9=$9":PS";
+                    $10=$10":"$2;
+                    gsub(/\\//, "|", $10);
+                    print;
+                }} else {{ print }}
+            }}' | bgzip -c > {output.vcf}
+        tabix -f -p vcf {output.vcf}
+
+        """
+
+# Rule to run SHAPEIT phasing
+rule shapeit_phasing:
+    input:
+        vcf = rules.manual_phasing.output.vcf,
+	map_file = lambda wildcards: get_reference_files(wildcards)["shapeit_map"],
+	ref_fie = lambda wildcards: get_reference_files(wildcards)["shapeit_ref"]
+    output:
+        shaped_vcf = "results/shapeit/{sample}.phased.vcf",
+	bingraph = "results/shapeit/{sample}.bingraph"
+    params:
+        shapeit_params = config.get("shapeit_params", "")
+    log:
+        "logs/shapeit/{sample}.log"
+    conda:
+        "envs/shapeit.yaml"
+    shell:
+	"""
+	shapeit4 {params.shapeit_params} \
+	    --output {output.shaped_vcf} \
+	    --bingraph {output.bingraph}
+
+	## adding chr if necessary
+	if [ "{config[use_chr_prefix]}" = "true" ]; then
+	    zcat {output.shaped_vcf} | \
+	    awk -v OFS=\"\t\" '/^#/{print} !/^#/{\$1=\"chr\"\$1; print}' | \
+	    sed -i 's/##contig=<ID=\([0-9XYM]\+\)>/##contig=<ID=chr\1>/' | \
+	    bgzip -c > {output.shaped_vcf}.tmp 
+	        	    
+	    mv {output.shaped_vcf}.tmp {output.shaped_vcf}
+	    tabix -f -p vcf {output.shaped_vcf} 
+	fi
+
+	## change phasing in whatshap by shapeit
+
+	"""
+
+
+
+# Rule to run haplotag
+rule haplotag:
+    input:
+        vcf = rules.shapeit_phasing.output.shaped_vcf,
+        bam = "input/{sample}.bam"
+    output:
+        tagged_bam = "results/haplotag/{sample}.haplotagged.bam"
+    params:
+        haplotag_params = config.get("haplotag_params", "")
+    log:
+        "logs/haplotag/{sample}.log"
+    conda:
+        "envs/haplotag.yaml"
+    shell:
+        "whatshap haplotag {params.haplotag_params} "
+        "-o {output.tagged_bam} {input.vcf} {input.bam} "
+        "2> {log}"
+
+# Rule to count reads per PS per allele
+rule count_ps_reads:
+    input:
+        bam = rules.haplotag.output.tagged_bam,
+        vcf = rules.shapeit_phasing.output.shaped_vcf
+    output:
+        counts = "results/counts/{sample}.counts.tsv"
+    params:
+        script = "scripts/count_ps_reads.py"  # Your custom script
+    log:
+        "logs/counts/{sample}.log"
+    conda:
+        "envs/counting.yaml"
+    shell:
+        "python {params.script} {input.bam} {input.vcf} "
+        "> {output.counts} 2> {log}"
+
+# Aggregation rule for multiple samples
+rule all:
+    input:
+        expand("results/counts/{sample}.counts.tsv", 
+               sample=config["samples"])
