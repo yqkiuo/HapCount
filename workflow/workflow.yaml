@@ -5,6 +5,9 @@ ruleorder:
     haplotag > count_ps_reads > shapeit_phasing > whatshap_phasing
 
 
+## downloading refereces
+## TODO: ask if to download references for shapeit and whatshap; Qiao
+
 # define references files
 def get_reference_files(wildcards):
     ## Return appropriate reference files based on genome build and chromosome
@@ -170,6 +173,7 @@ rule haplotag:
         """
 
 #### counting rules ####
+## TODO: counting per PS per CB(singlecellRNAseq) 
 
 def get_counting_script(wildcards):
     ## Return the appropriate counting script path based on datatype
@@ -209,6 +213,8 @@ for datatype in config["datatypes"]:
 
 
 #### aggregating rules ####
+## TODO: aggregate by PS by bin for downstream analysis
+
 
 def get_aggre_script(wildcards):
     ## Return the appropriate counting script path based on datatype
